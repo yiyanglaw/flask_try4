@@ -1,11 +1,14 @@
 from flask import Flask, request
 import pandas as pd
 import numpy as np
-from keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from keras.models import Sequential
-from keras.layers import Embedding, Conv1D, MaxPooling1D, Flatten, Dense
 from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.linear_model import SGDClassifier
+import re
 
 app = Flask(__name__)
 
@@ -15,42 +18,56 @@ data.columns = ['url', 'label']
 data['label'] = data['label'].apply(lambda x: 1 if x == 'bad' else 0)
 
 # Preprocess the data
-tokenizer = Tokenizer()
-tokenizer.fit_on_texts(data['url'])
-X = tokenizer.texts_to_sequences(data['url'])
-max_len = max([len(seq) for seq in X])
-X = pad_sequences(X, maxlen=max_len)
+X = data['url'].values
 y = data['label'].values
 
 # Split the data into train and test sets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Define the 1D CNN model
-model = Sequential()
-model.add(Embedding(input_dim=len(tokenizer.word_index) + 1, output_dim=128, input_length=max_len))
-model.add(Conv1D(filters=64, kernel_size=5, activation='relu'))
-model.add(MaxPooling1D(pool_size=2))
-model.add(Flatten())
-model.add(Dense(units=64, activation='relu'))
-model.add(Dense(units=1, activation='sigmoid'))
+# Define a custom transformer to convert URLs to character-level n-gram representations
+class URLToNgram(BaseEstimator, TransformerMixin):
+    def __init__(self, ngram_range=(2, 3)):
+        self.ngram_range = ngram_range
+        self.vectorizer = CountVectorizer(analyzer='char', ngram_range=ngram_range)
 
-# Compile the model
-model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    def fit(self, X, y=None):
+        self.vectorizer.fit(X)
+        return self
+
+    def transform(self, X, y=None):
+        return self.vectorizer.transform(X)
+
+# Define a pipeline for training the model
+pipeline = Pipeline([
+    ('url_to_ngram', URLToNgram()),
+    ('tfidf', TfidfTransformer()),
+    ('clf', SGDClassifier(loss='log', alpha=1e-5, penalty='elasticnet', max_iter=100))
+])
 
 # Train the model
-model.fit(X_train, y_train, epochs=1, batch_size=64, validation_data=(X_test, y_test))
+pipeline.fit(X_train, y_train)
+
+# Evaluate the model
+y_pred = pipeline.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print("Accuracy:", accuracy)
+
+# Function to preprocess URLs
+def preprocess_url(url):
+    # Remove common prefixes like "http://", "https://", and "www."
+    url = re.sub(r'^https?://|www.', '', url)
+    return url
 
 @app.route('/predict_url', methods=['POST'])
 def predict_url():
     url = request.form['url']
-    sequence = tokenizer.texts_to_sequences([url])
-    sequence = pad_sequences(sequence, maxlen=max_len)
-    prediction = model.predict(sequence)[0][0]
-    if prediction >= 0.5:
+    url = preprocess_url(url)
+    prediction = pipeline.predict([url])[0]
+    if prediction == 1:
         result = 'Bad URL'
     else:
         result = 'Good URL'
     return result
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000, debug=False)
+app.run(host='0.0.0.0', port=10000, debug=False)
+
